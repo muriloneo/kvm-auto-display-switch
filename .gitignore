@@ -1,0 +1,6 @@
+.DS_Store
+macos/.build/
+macos/.swiftpm/
+*.xcodeproj/
+windows/*.exe
+windows/*.log

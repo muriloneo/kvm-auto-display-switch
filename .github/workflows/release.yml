@@ -1,0 +1,105 @@
+# Every push to main: test, build both apps, bump the patch version, and publish a
+# GitHub release whose notes list the commits since the previous release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.next.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: next
+        run: |
+          latest=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$latest" ]; then
+            tag=v0.1.0
+            range=HEAD
+          else
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            tag="v$major.$minor.$((patch + 1))"
+            range="$latest..HEAD"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Changes"
+            echo
+            git log "$range" --no-merges --pretty='- %s (%h)'
+            if [ -n "$latest" ]; then
+              echo
+              echo "Full diff: https://github.com/${{ github.repository }}/compare/$latest...$tag"
+            fi
+          } > notes.md
+          cat notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: macos
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+      - name: Build app and CLI
+        run: |
+          app="$(./scripts/bundle-app.sh "${{ needs.version.outputs.tag }}")"
+          mkdir -p dist
+          ditto "$app" "dist/KVM Switcher.app"
+          cp .build/release/kvmctl dist/
+          cp scripts/check.sh scripts/find-inputs.sh scripts/find-kvm-usb.sh dist/
+          ditto -c -k --sequesterRsrc dist "KVM-Switcher-macOS-${{ needs.version.outputs.tag }}.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: macos/KVM-Switcher-macOS-*.zip
+
+  windows:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - run: windows/build.sh
+      - run: |
+          cd windows
+          zip "../KVM-Switcher-Windows-${{ needs.version.outputs.tag }}.zip" KVMSwitcher.exe find-inputs.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: KVM-Switcher-Windows-*.zip
+
+  release:
+    needs: [version, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.version.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "${{ needs.version.outputs.tag }}" \
+            --notes-file notes.md \
+            KVM-Switcher-macOS-*.zip KVM-Switcher-Windows-*.zip
