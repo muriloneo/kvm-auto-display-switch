@@ -22,6 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var watcher: UsbKvmWatcher?
     private var autoSwitcher: AutoSwitcher?
     private var kvmConfig: KvmDetectionConfig?
+    private var kvmSubscription: KvmSubscription?
+    private var thisComputer: String?
+    private let layout = LayoutKeeper()
     private var autoSwitchEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: Self.autoSwitchKey) }
         set { UserDefaults.standard.set(newValue, forKey: Self.autoSwitchKey) }
@@ -43,6 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard flags.contains(.addFlag) || flags.contains(.removeFlag), let context else { return }
             let delegate = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
             delegate.scheduleRefresh(reason: "display reconfigured", after: 1.0)
+            delegate.layout.displaysChanged()
         }, Unmanaged.passUnretained(self).toOpaque())
 
         let center = NSWorkspace.shared.notificationCenter
@@ -83,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 reading = now
                 targets = newTargets
                 configError = loadError
+                thisComputer = configuration.thisComputer
                 if configuration.kvm != kvmConfig {
                     kvmConfig = configuration.kvm
                     restartAutoSwitch()
@@ -154,6 +159,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             let auto = disabled("Auto switch (add a \"kvm\" section in Settings)")
             menu.addItem(auto)
+        }
+        menu.addItem(.separator())
+        if layout.canMoveWindows {
+            let restore = action("Restore Window Layout", #selector(restoreLayout), key: "")
+            restore.isEnabled = layout.hasSnapshot
+            menu.addItem(restore)
+        } else {
+            menu.addItem(action("Allow Window Restore (Accessibility)…", #selector(allowWindowRestore), key: ""))
         }
         addFooter(menu)
         scheduleRefresh(reason: "menu opened", after: 0)
@@ -229,10 +242,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func restartAutoSwitch() {
         autoSwitcher?.stop()
         autoSwitcher = nil
+        kvmSubscription = nil
         watcher?.stop()
         watcher = nil
         guard let kvmConfig else { return }
         let watcher = UsbKvmWatcher(config: kvmConfig)
+        kvmSubscription = watcher.provider.subscribe { [weak self] state in
+            DispatchQueue.main.async { self?.kvmChanged(state) }
+        }
         if autoSwitchEnabled {
             // DDC is slow; keep it off the watcher's (main) run loop.
             let auto = AutoSwitcher(controller: controller, provider: ForwardingProvider(watcher.provider, queue: work))
@@ -244,6 +261,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         watcher.start()
         self.watcher = watcher
+    }
+
+    /// The monitor drops off this Mac for a moment when it comes back, so the layout is
+    /// saved on the way out and restored once the displays settle. Independent of Auto switch.
+    private func kvmChanged(_ state: KvmState) {
+        guard let computer = state.activeComputer, let thisComputer else { return }
+        if computer == thisComputer {
+            layout.kvmReturned()
+        } else {
+            layout.save(reason: "kvm -> \(computer)")
+        }
+    }
+
+    @objc private func restoreLayout() {
+        layout.restoreNow()
+    }
+
+    @objc private func allowWindowRestore() {
+        layout.requestPermission()
     }
 
     @objc private func toggleLaunchAtLogin() {

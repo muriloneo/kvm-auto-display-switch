@@ -26,5 +26,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --sign - "$APP" >&2
+# A real identity keeps the Accessibility grant across rebuilds; ad-hoc (CI) loses it every build.
+IDENTITY="${KVM_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk -F'"' '/Apple Development/ { print $2; exit }')}"
+codesign --force --sign "${IDENTITY:--}" "$APP" >&2
 echo "$(pwd)/$APP"
